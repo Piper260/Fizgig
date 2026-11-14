@@ -18,6 +18,7 @@ in _family_launch_inputs: the same keys, the same switches, the family options u
 
 The generic rows mirror the desktop Training and Samples tabs (lora_trainer_gui.py); their defaults are its
 self.settings defaults, and a family's first preset is applied over them on a first visit, as the desktop does."""
+import math
 import os
 
 from fizgig.families import launch
@@ -38,6 +39,7 @@ KINDS = (("standard", "Standard LoRA"), ("edit", "Edit (original + edited photo 
          ("slider", "Slider (a dial between two looks)"), ("finetune", "Fine-tune the whole model"))
 FT_REG_MULT = ("0.05", "0.1", "0.2", "0.3", "0.5", "0.75", "1.0")
 CAPTION_DROPOUTS = ("Off", "0.05", "0.10 (strong)")
+LENGTH_MODES = ("Epochs", "Steps")             # Training length's pills (TRAIN_LENGTH_MODE)
 # rows that belong together, drawn as one box each on the Training tab (app.js renderSection): the box sits where its
 # first row is, its rows side by side, their hints behind its ?
 ROW_GROUPS = (
@@ -68,6 +70,7 @@ def caption_dropout_share(label):
 DEFAULTS = {
     "LORA_NAME": "", "LEARNING_RATE": "4e-4", "LORA_LR_RATIO": "1", "NETWORK_DIM": "4", "NETWORK_ALPHA": "4",
     "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": "8", "MAX_TRAIN_EPOCHS": "12", "SAVE_EVERY_N_EPOCHS": "1",
+    "TRAIN_LENGTH_MODE": "Epochs", "MAX_TRAIN_STEPS": "",
     "SAVE_LATER": False, "SAVE_UNTIL_EPOCH": "10", "SAVE_EVERY_AFTER": "1",
     "SEED": "42", "BLOCKS_SWAP": "Auto (detect from GPU)", "RESUME_TRAINING": "", "OPTIMIZER_TYPE": "adamw8bit",
     "OPTIMIZER_ARGS": "", "GRADIENT_ACCUMULATION": "1", "BATCH_SIZE": "1", "MAX_GRAD_NORM": "1.0", "LR_SCHEDULER": "constant",
@@ -317,7 +320,13 @@ def form(desc):
     params += [
         _row("NETWORK_DIM", "Network Dim (Rank)"),
         _row("NETWORK_ALPHA", "Network Alpha"),
-        _row("MAX_TRAIN_EPOCHS", "Max Epochs"),
+        # one control for how long it trains: Epochs or Steps, each shown in the other as you type (the steps per
+        # epoch come from the state's "length", counted from the training folder)
+        _row("MAX_TRAIN_EPOCHS", "Training length", "length",
+             "Epochs: every picture once per epoch. Steps: one optimizer step per batch of pictures - handy for "
+             "matching a recipe's step count across datasets of different sizes. A step target trains whole epochs, "
+             "rounding up to the end of the epoch it falls in, so saves, previews and resume keep working.",
+             mode_key="TRAIN_LENGTH_MODE", steps_key="MAX_TRAIN_STEPS", modes=list(LENGTH_MODES)),
         # the same control as How often to preview (a cadence row): every N epochs, switched on another rate from
         # an epoch on; ticking fills in every 5, then from epoch 10 every 1
         _row("SAVE_EVERY_N_EPOCHS", "How often to save", "cadence",
@@ -1099,8 +1108,9 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             force["OPTIMIZER_ARGS"] = ""
     hidden |= {s for s, k in (("edit", "edit"), ("slider", "slider"), ("finetune", "finetune")) if k != kind}
     if kind == "finetune":
-        disabled |= {"MAX_TRAIN_EPOCHS", "SAVE_EVERY_N_EPOCHS"}
+        disabled |= {"MAX_TRAIN_EPOCHS", "SAVE_EVERY_N_EPOCHS", "TRAIN_LENGTH_MODE", "MAX_TRAIN_STEPS"}
         hidden |= {"CONTEXT_LORA_PATH", "CONTEXT_LORA_STRENGTH"}
+        notes["MAX_TRAIN_EPOCHS"] = "A fine-tune's length is set by its rotations (Fine-tune card)."
     if kind != "standard":
         hidden.add("FAMILY_FAST_ID")
     if not desc.subject_isolation:                    # a family without it (a music model): a normal LoRA, always
@@ -1365,7 +1375,68 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     return {"hidden": sorted(hidden), "disabled": sorted(disabled), "notes": notes, "kind": kind,
             "media": sorted(media), "turbo_file": bool(speed_file), "force": force, "actions": actions,
             "shown": shown, "checkpoint_file": bool(checkpoint_file), "labels": labels, "checkpoint_turbo": ck_turbo,
-            "disabled_choices": disabled_choices, "poll": poll}
+            "disabled_choices": disabled_choices, "poll": poll,
+            "length": length_info(desc, values, image_folder, kind)}
+
+
+_media_counts = {}                               # {folder: (mtime, items)}: length_info runs on every change
+
+
+def _items_in(folder):
+    """Training items (photos, clips, songs) in one folder, cached until the folder changes."""
+    try:
+        mt = os.stat(folder).st_mtime
+    except (OSError, TypeError):
+        return 0
+    hit = _media_counts.get(folder)
+    if not hit or hit[0] != mt:
+        hit = _media_counts[folder] = (mt, launch._media_count(folder))
+    return hit[1]
+
+
+def length_info(desc, values, image_folder, kind):
+    """What Training length converts with: {"items", "batch", "per_epoch", "exact", "why"} - the items an epoch
+    trains (the training folder, Subjects 2-4 with their balance repeats, sub-folders when ticked) and the steps that
+    makes at the run's batch size. `exact` is False where the trainer's own count can differ (batches fill per bucket,
+    group pictures, detail crops); the trainer always converts with its real count. per_epoch 0 = nothing to count."""
+    folder = str(image_folder or "").strip()
+    if not folder or not os.path.isdir(folder):
+        return {"items": 0, "batch": 1, "per_epoch": 0, "exact": False,
+                "why": "Pick a training folder on the Start tab to see steps per epoch."}
+    st = {**DEFAULTS, **values, "image_folder": folder,
+          "multiconcept": bool(values.get("FAMILY_MULTICONCEPT")) and desc.multi_concept and kind not in ("edit", "slider"),
+          "subfolders": bool(values.get("TRAIN_SUBFOLDERS")),
+          "FAMILY_EDIT": kind == "edit", "FAMILY_SLIDER": kind == "slider", "FAMILY_FT": kind == "finetune"}
+    folders = [folder]
+    if st["multiconcept"]:
+        folders += [str(values.get(d) or "").strip() for d, _t, _c in CONCEPT_ROWS[:concept_count(values) - 1]]
+        folders = [f for f in folders if f and os.path.isdir(f)]
+    reps = launch._balance_repeats(folders) if len(folders) > 1 and values.get("FAMILY_CONCEPT_BALANCE") else {}
+    items = sum(_items_in(f) * reps.get(f, 1) for f in folders)
+    try:
+        if launch.subfolders_on(desc, st):
+            items += sum(_items_in(f) for _rel, f in launch.subfolders(folder, (str(values.get("LORA_OUTPUT_DIR") or ""),)))
+    except Exception:                             # a tree that can't be walked: what's at the top still counts
+        pass
+    auto = str(values.get("BATCH_SIZE") or "").strip().lower() == "auto"
+    batch = 1 if auto else launch.batch_size(desc, st)
+    why = []
+    if batch > 1:
+        why.append("batches fill per picture shape, so a few more steps is usual")
+    if auto and desc.batch_training:
+        why.append("Batch size Auto is picked when the run starts")
+    if kind == "standard" and values.get("FAMILY_MULTI_PERSON"):
+        why.append("Fizgig LoRA Isolation adds group pictures")
+    try:
+        if launch.detail_crops_on(desc, st):
+            why.append("detail crops add pictures")
+    except Exception:
+        pass
+    per_epoch = math.ceil(items / batch) if items else 0
+    return {"items": items, "batch": batch, "per_epoch": per_epoch, "exact": not why and bool(items),
+            "why": ("About: " + "; ".join(why) + ". The run's log gives the real count.") if why and items else
+                   ("" if items else "No training pictures found in the folder yet.")}
+
 
 
 def _extras_found(desc, values, image_folder):

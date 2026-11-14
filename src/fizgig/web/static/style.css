@@ -2470,6 +2470,44 @@ a.pick-pill-vast:hover { border-color: var(--success); }
 .kind-cadence .cad-num:disabled { opacity: 0.45; }
 .kind-cadence .field-hint { margin-top: 6px; }
 
+/* Training length: Epochs / Steps pills, a box with - / +, a slider that snaps to whole epochs, quick picks and a line
+   saying where it lands */
+.section-card[id^="sec-"] .form-group-rows > .form-row.kind-length { flex: 3 1 340px; }
+.kind-length .len-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 8px; }
+.kind-length .len-title { color: var(--text-secondary); font-weight: 600; font-size: 12.5px; }
+.kind-length .len-pills { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-inset); }
+.kind-length .len-pill { position: relative; cursor: pointer; margin: 0; }
+.kind-length .len-pill input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.kind-length .len-pill span { display: block; padding: 4px 14px; border-radius: 999px; font-weight: 600; font-size: 12.5px;
+  color: var(--text-secondary); transition: background .12s, color .12s; }
+.kind-length .len-pill:hover span { color: var(--text-primary); }
+.kind-length .len-pill input:checked + span { background: var(--accent); color: var(--text-on-color, #fff); }
+.kind-length .len-pill input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+.kind-length .len-pill input:disabled + span { opacity: .45; cursor: not-allowed; }
+.kind-length .len-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.section-card[id^="sec-"] .form-row.kind-length input.len-num { width: 88px; min-width: 0; max-width: 88px; flex: 0 0 88px;
+  text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.section-card[id^="sec-"] .form-row.kind-length .len-step { flex: 0 0 32px; width: 32px; height: 32px; padding: 0;
+  font-size: 17px; line-height: 1; }
+.kind-length .len-unit { color: var(--text-secondary); }
+.kind-length .len-eq { margin-left: 4px; padding: 3px 10px; border-radius: 999px; background: var(--accent-subtle);
+  color: var(--text-on-subtle, var(--text-primary)); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kind-length .len-eq:empty { display: none; }
+.kind-length input.len-slider { display: block; width: 100%; margin: 12px 0 8px; }
+.kind-length .len-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.kind-length .len-pick { padding: 3px 11px; border-radius: 999px; border: 1px solid var(--border); background: transparent;
+  color: var(--text-secondary); font-size: 12px; font-weight: 600; cursor: pointer; font-variant-numeric: tabular-nums; }
+.kind-length .len-pick:hover { border-color: var(--accent); color: var(--text-primary); }
+.kind-length .len-pick.on { border-color: var(--accent); background: var(--accent-subtle);
+  color: var(--text-on-subtle, var(--text-primary)); }
+.kind-length .len-land { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: var(--text-explain, var(--text-secondary)); }
+.kind-length .len-land b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.kind-length .len-land .btn-sm { margin-left: 6px; height: 24px; padding: 0 9px; vertical-align: 1px; }
+.kind-length button:disabled, .kind-length input:disabled { opacity: .45; cursor: not-allowed; }
+.kind-length .len-why:empty { display: none; }
+
 /* a single choice greyed in a row of pills */
 .checkbox-label.choice-off { opacity: 0.4; cursor: not-allowed; }
 .run-helper .pod-dot { display: inline-block; vertical-align: -1px; }

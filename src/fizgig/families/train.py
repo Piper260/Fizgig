@@ -1070,7 +1070,7 @@ class _FineTune:
 
 def train_family(family, dit_path, dataset_config, output_dir, output_name, *, network_dim=32, network_alpha=32,
                  preview_small_card_cap=0,
-                 learning_rate=1e-4, max_train_epochs=16, save_every_n_epochs=1, save_until_epoch=0,
+                 learning_rate=1e-4, max_train_epochs=16, max_train_steps=0, save_every_n_epochs=1, save_until_epoch=0,
                  save_every_n_epochs_after=0, save_state=False,
                  save_state_on_train_end=False, keep_last_n_states=2, seed=42, precision="bf16",
                  training_adapter=None, training_adapter_strength=1.0,
@@ -1373,6 +1373,16 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
             low_iter[0] = iter(low_loader)
             return next(low_iter[0])
     steps_per_epoch = len(loader)
+    if max_train_steps and int(max_train_steps) > 0 and not finetune:
+        # Length in steps (the Training tab's Steps pill): whole epochs, enough to reach the steps asked for - the
+        # saves, previews, resume states and the LR schedule all keep working at epoch ends. The web UI's count is an
+        # estimate from the folder; this is the real one (buckets, repeats, sub-folders)
+        _asked = int(max_train_steps)
+        max_train_epochs = max(1, math.ceil(_asked / max(1, steps_per_epoch)))
+        _real = max_train_epochs * steps_per_epoch
+        logger.info(f"[length] {_asked} steps asked at {steps_per_epoch} steps/epoch -> {max_train_epochs} epochs "
+                    f"({_real} steps" + (f", {_real - _asked} past the target to end on a whole epoch)" if _real != _asked
+                                         else ")"))
     logger.info(f"{desc.display_name} training: {group.num_train_items} items, {max_train_epochs} epochs, "
                 f"{steps_per_epoch} steps/epoch")
     _launch = uuid.uuid4().hex[:12]      # this launch: a re-run of the same name is a new training share
@@ -3017,6 +3027,8 @@ def setup_parser():
     p.add_argument("--network_alpha", type=float, default=32)
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--max_train_epochs", type=int, default=16)
+    p.add_argument("--max_train_steps", type=int, default=0,
+                   help="Above 0: train this many steps instead, rounded up to whole epochs (overrides --max_train_epochs)")
     p.add_argument("--save_every_n_epochs", type=int, default=1)
     p.add_argument("--save_until_epoch", type=int, default=0,
                    help="With --save_every_n_epochs_after: saves every --save_every_n_epochs up to this epoch")
@@ -3178,7 +3190,7 @@ def main():
         recaption_instruction_detailed=a.recaption_instruction_detailed, captioner=a.captioner,
         recaption_task=a.recaption_task, recaption_task_detailed=a.recaption_task_detailed,
         network_dim=a.network_dim, network_alpha=a.network_alpha, learning_rate=a.learning_rate,
-        max_train_epochs=a.max_train_epochs, save_every_n_epochs=a.save_every_n_epochs,
+        max_train_epochs=a.max_train_epochs, max_train_steps=a.max_train_steps, save_every_n_epochs=a.save_every_n_epochs,
         save_until_epoch=a.save_until_epoch, save_every_n_epochs_after=a.save_every_n_epochs_after, save_state=a.save_state,
         save_state_on_train_end=a.save_state_on_train_end, keep_last_n_states=a.keep_last_n_states, seed=a.seed,
         training_adapter=a.training_adapter, training_adapter_strength=a.training_adapter_strength,

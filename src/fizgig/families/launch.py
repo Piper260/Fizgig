@@ -854,6 +854,17 @@ def _state_flags(st):
     return flags
 
 
+def length_steps(st):
+    """Training length's step target when it is set in Steps (TRAIN_LENGTH_MODE), else 0 (it trains in epochs).
+    A fine-tune is always set by its rotations."""
+    if str(st.get("TRAIN_LENGTH_MODE") or "").strip().lower() != "steps" or st.get("FAMILY_FT"):
+        return 0
+    try:
+        return max(0, int(float(str(st.get("MAX_TRAIN_STEPS") or "0").replace(",", "").strip() or 0)))
+    except ValueError:
+        return 0
+
+
 def train_command(desc, inputs, plan):
     """families/train.py. Model paths from the description's roles, training settings from the run's settings,
     previews from the sample settings. Preview prompt files and console lines go into `plan`."""
@@ -865,6 +876,8 @@ def train_command(desc, inputs, plan):
            "--network_dim", str(st["NETWORK_DIM"]), "--network_alpha", str(st["NETWORK_ALPHA"]),
            "--learning_rate", str(st["LEARNING_RATE"]), "--max_train_epochs", str(st["MAX_TRAIN_EPOCHS"]),
            "--save_every_n_epochs", str(st["SAVE_EVERY_N_EPOCHS"]), "--seed", str(st["SEED"])]
+    if length_steps(st):                  # Training length in steps: the trainer turns it into whole epochs
+        cmd += ["--max_train_steps", str(length_steps(st))]
     # How often to save, switched on (a fine-tune saves at whole rotations)
     later = [_s(st.get(k)) for k in ("SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER")] \
         if st.get("SAVE_LATER") and not ft_on(desc, st) else []

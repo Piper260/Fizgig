@@ -305,7 +305,7 @@ function renderRow(r) {
   // its kind sets its layout (style.css): boxes in the grid, switches as tiles, a choice of pills, files and notes
   // across the card - from the schema's row kind, so every model's form lays out the same way
   const kind = {check: "check", radio: "radio", note: "note", text: "wide", path: "wide", folder: "wide", shown: "wide",
-    cadence: "cadence", split: "cadence"}[r.kind] || "field";
+    cadence: "cadence", split: "cadence", length: "length"}[r.kind] || "field";
   const wrap = el("div", {class: "form-row kind-" + kind + (r.featured ? " row-featured" : "") +
     (r.boxed ? " row-boxed" : ""), "data-key": r.key});
   if (r.kind === "shown") {                       // a value from elsewhere (the Start tab's folder), read-only here
@@ -333,6 +333,7 @@ function renderRow(r) {
   if (r.kind === "blocks") return blockPicker(r, wrap);
   if (r.lines) return promptLines(r, wrap);
   if (r.kind === "cadence") return cadenceRow(r, wrap);
+  if (r.kind === "length") return lengthRow(r, wrap);
   if (r.kind === "split") return splitRow(r, wrap);
   if (r.kind === "check") {
     input = el("input", {type: "checkbox", id: "f_" + r.key, onchange: (e) => set(e.target.checked)});
@@ -465,6 +466,143 @@ function cadenceRow(r, wrap) {
       el("span", {class: "cad-pair"}, el("span", {text: "every"}), num(after), el("span", {text: "epochs"}))),
     el("div", {class: "field-hint row-note", id: "note_" + r.key}),
     el("div", {class: "field-hint", "data-part": later, text: r.hint}));
+  return wrap;
+}
+
+// Training length: one control counted in Epochs or Steps (the pills), each shown in the other as you type. The
+// steps per epoch come from the form's state (form.py length_info: the training folder counted at the run's batch
+// size); the trainer converts again with its own real count. A step target trains whole epochs, up to the end of the
+// epoch it falls in - the line under the slider says where it lands and offers the whole-epoch counts either side.
+// MAX_TRAIN_EPOCHS always holds the epochs the run trains (the checks, previews and resume read it); in Steps,
+// MAX_TRAIN_STEPS is the number you set and the epochs follow it.
+const LEN_PICKS = {Epochs: [5, 10, 15, 20, 30], Steps: [500, 1000, 1500, 2000, 3000]};
+const fmtN = (n) => Number(n).toLocaleString();
+const lenNum = (v) => { const n = parseInt(String(v ?? "").replace(/[,\s_]/g, ""), 10); return isNaN(n) ? 0 : n; };
+const lenPer = () => ((S.state && S.state.length) || {}).per_epoch || 0;
+const lenMode = () => String(S.values.TRAIN_LENGTH_MODE || "Epochs").toLowerCase() === "steps" ? "Steps" : "Epochs";
+
+// after each state refresh (the steps per epoch may have moved: another folder, batch size): in Steps the epochs
+// follow the steps, unless the epochs were changed from elsewhere (a preset gives epochs) - then the steps follow them
+function lengthFollow() {
+  const per = lenPer();
+  if (lenMode() === "Steps" && per) {
+    const ep = lenNum(S.values.MAX_TRAIN_EPOCHS), st = lenNum(S.values.MAX_TRAIN_STEPS);
+    const outside = S._lenWrote !== undefined && String(S.values.MAX_TRAIN_EPOCHS) !== S._lenWrote;
+    let moved = false;
+    if (ep && (!st || (outside && Math.ceil(st / per) !== ep))) {
+      S.values.MAX_TRAIN_STEPS = String(ep * per); moved = true;
+    } else if (st) {
+      const want = String(Math.max(1, Math.ceil(st / per)));
+      if (String(S.values.MAX_TRAIN_EPOCHS) !== want) { S.values.MAX_TRAIN_EPOCHS = want; moved = true; }
+    }
+    if (moved) { saveStateSoon(); refreshStateSoon(); }      // the epochs' own notes (a long-run hint) follow
+  }
+  S._lenWrote = String(S.values.MAX_TRAIN_EPOCHS ?? "");
+  if (S._lenDraw) S._lenDraw();
+}
+
+function lengthRow(r, wrap) {
+  const EK = r.key, SK = r.steps_key, MK = r.mode_key;
+  const f = (x) => ({"data-field": EK, ...x});       // every part greys with the row (a fine-tune sets its own)
+  const write = (vals) => {
+    for (const [k, v] of Object.entries(vals)) onValue({key: k}, String(v));
+    S._lenWrote = String(S.values[EK] ?? "");
+    draw();
+  };
+  const both = (steps) => {                           // a step count, and the whole epochs it trains
+    const per = lenPer();
+    return per && steps > 0 ? {[SK]: steps, [EK]: Math.max(1, Math.ceil(steps / per))} : {[SK]: steps};
+  };
+  function nudge(d) {
+    const per = lenPer();
+    if (lenMode() === "Epochs") return write({[EK]: Math.max(1, lenNum(S.values[EK]) + d)});
+    const cur = lenNum(S.values[SK]), by = per || 100;
+    const next = d > 0 ? (Math.floor(cur / by) + 1) * by : Math.max(by, (Math.ceil(cur / by) - 1) * by);
+    write(both(next));
+  }
+  function switchTo(m) {
+    const per = lenPer(), vals = {[MK]: m};
+    if (m === "Steps" && per) vals[SK] = Math.max(1, lenNum(S.values[EK])) * per;   // the same length, in steps
+    if (m === "Epochs" && per && lenNum(S.values[SK])) vals[EK] = Math.max(1, Math.ceil(lenNum(S.values[SK]) / per));
+    write(vals);
+  }
+  const box = el("input", f({type: "text", inputmode: "numeric", class: "len-num", "aria-label": "Training length",
+    oninput: (e) => {
+      const raw = e.target.value.trim();
+      write(lenMode() === "Steps" ? {...both(lenNum(raw)), [SK]: raw} : {[EK]: raw});
+    },
+    onkeydown: (e) => {                               // arrows step as the - / + buttons do
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); nudge(e.key === "ArrowUp" ? 1 : -1); box.select(); }
+    }}));
+  const minus = el("button", f({type: "button", class: "btn len-step", text: "−", onclick: () => nudge(-1)}));
+  const plus = el("button", f({type: "button", class: "btn len-step", text: "+", onclick: () => nudge(1)}));
+  const unit = el("span", {class: "len-unit"}), eq = el("span", {class: "len-eq"});
+  const slider = el("input", f({type: "range", class: "len-slider", "aria-label": "Training length",
+    oninput: (e) => write(lenMode() === "Steps" ? both(lenNum(e.target.value)) : {[EK]: e.target.value})}));
+  const picks = el("div", {class: "len-picks"}), land = el("div", {class: "len-land"});
+  const why = el("div", {class: "field-hint len-why"});
+  const pills = el("div", {class: "len-pills", role: "radiogroup", "aria-label": "Count training in"});
+  for (const m of r.modes || ["Epochs", "Steps"]) {
+    pills.append(el("label", {class: "len-pill", title: m === "Steps" ? "Set how many training steps" :
+      "Set how many times it goes through every picture"},
+      el("input", f({type: "radio", name: "len_" + EK, value: m, onchange: () => switchTo(m)})), el("span", {text: m})));
+  }
+  function draw() {
+    const mode = lenMode(), per = lenPer(), L = (S.state && S.state.length) || {}, steps = mode === "Steps";
+    const ep = lenNum(S.values[EK]), st = lenNum(S.values[SK]), about = L.exact ? "" : "≈ ";
+    pills.querySelectorAll("input").forEach((rb) => { rb.checked = rb.value === mode; });
+    if (document.activeElement !== box) box.value = String((steps ? S.values[SK] : S.values[EK]) ?? "");
+    unit.textContent = steps ? (st === 1 ? "step" : "steps") : (ep === 1 ? "epoch" : "epochs");
+    minus.title = steps ? (per ? "Back to the previous whole epoch" : "100 steps less") : "One epoch less";
+    plus.title = steps ? (per ? "On to the next whole epoch" : "100 steps more") : "One epoch more";
+    const by = steps ? (per || 100) : 1, cur = steps ? st : ep;
+    const top = steps ? Math.max(by * 40, Math.ceil((cur * 1.5) / by) * by) : Math.max(40, Math.ceil(cur * 1.5));
+    Object.assign(slider, {min: by, max: top, step: by});
+    slider.value = cur || by;
+    slider.title = steps && per ? "Snaps to whole epochs - type in the box for any step count" : "";
+    // the other unit, as a chip beside the box
+    eq.textContent = !per || !cur ? "" : steps ? `${fmtN(Math.ceil(st / per))} ${Math.ceil(st / per) === 1 ? "epoch" : "epochs"}`
+      : `${about}${fmtN(ep * per)} steps`;
+    picks.replaceChildren(...LEN_PICKS[mode].map((n) => el("button", f({type: "button",
+      class: "len-pick" + (n === cur ? " on" : ""), text: fmtN(n),
+      onclick: () => write(steps ? both(n) : {[EK]: n})}))));
+    // where it lands
+    land.replaceChildren();
+    const pics = L.items ? `${fmtN(L.items)} ${L.items === 1 ? "picture" : "pictures"}` +
+      (L.batch > 1 ? `, ${L.batch} a step` : "") : "";
+    if (!per) {
+      land.append(steps ? "The trainer works out the epochs from its real step count when it starts. " : "",
+        L.why || "Steps per epoch shows once a training folder is picked.");
+    } else if (!steps) {
+      land.append(el("b", {text: `${about}${fmtN(per)} steps per epoch`}), ` (${pics}).`);
+    } else if (!st) {
+      land.append(`Type how many steps to train: ${about}${fmtN(per)} make an epoch (${pics}).`);
+    } else {
+      const E = Math.max(1, Math.ceil(st / per)), real = E * per;
+      if (real === st) {
+        land.append("Exactly ", el("b", {text: `${fmtN(E)} ${E === 1 ? "epoch" : "epochs"}`}), ` of ${about}${fmtN(per)} steps (${pics}).`);
+      } else {
+        land.append("Trains ", el("b", {text: `${fmtN(E)} ${E === 1 ? "epoch" : "epochs"} ${about || "= "}${fmtN(real)} steps`}),
+          `, finishing the epoch your ${fmtN(st)} falls in (${fmtN(real - st)} more).`);
+        const snap = (n) => el("button", f({type: "button", class: "btn btn-sm", text: `Use ${fmtN(n)}`,
+          title: `${fmtN(n / per)} whole epochs`, onclick: () => write(both(n))}));
+        if (E > 1) land.append(snap((E - 1) * per));
+        land.append(snap(real));
+      }
+    }
+    why.textContent = per && !L.exact ? (L.why || "") : "";
+    // a part greyed by the state stays greyed as it redraws
+    const off = new Set((S.state && S.state.disabled) || []).has(EK);
+    wrap.querySelectorAll("input,button").forEach((i) => { if (i.type !== "hidden") i.disabled = off; });
+  }
+  const sync = [EK, SK, MK].map((k) => { const i = el("input", {type: "hidden", id: "f_" + k}); i._sync = draw; return i; });
+  wrap.append(
+    el("div", {class: "len-head"}, el("span", {class: "len-title", text: r.label}), pills),
+    el("div", {class: "len-line"}, minus, box, plus, unit, eq),
+    slider, picks, land, why, ...sync,
+    el("div", {class: "field-hint row-note", id: "note_" + EK}));
+  S._lenDraw = draw;
+  draw();
   return wrap;
 }
 
@@ -883,6 +1021,7 @@ async function refreshState() {
     d.style.display = extras.some((c) => c.style.display !== "none") ? "" : "none";
   });
   turboFollow();
+  lengthFollow();
   if (S.state.pending) setTimeout(refreshStateSoon, 2500);   // a note still being worked out (the fine-tune plan)
 }
 
