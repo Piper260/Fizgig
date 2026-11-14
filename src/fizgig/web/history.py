@@ -183,8 +183,8 @@ def _flush_curve(run_id):
         _set_curve(run_id, [p for p in c[2] if p[0] != c[0]] + [[c[0], c[1]]])
 
 
-def end(run_id, result, progress=None):
-    """A run ended (finished / failed / stopped / paused), with its last figures."""
+def end(run_id, result, progress=None, energy=None):
+    """A run ended (finished / failed / stopped / paused), with its last figures (and the energy it used, power.py)."""
     if not run_id:
         return
     _flush_curve(run_id)
@@ -194,6 +194,8 @@ def end(run_id, result, progress=None):
             for r in runs:
                 if r.get("id") == run_id:
                     r.update(result=result, ended_at=time.time(), progress=progress or r.get("progress"))
+                    if energy:
+                        r["energy"] = energy
             _write(runs)
     except OSError:
         pass

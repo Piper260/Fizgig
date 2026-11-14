@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from fizgig.dataset.masks import is_mask_file, mask_for_stem
 from fizgig.families import form, launch
 from fizgig.families.registry import get as get_family, training_families
-from fizgig.web import captions, history
+from fizgig.web import captions, history, power
 from fizgig.web import queue as webqueue
 from fizgig.web import prep_jobs
 from fizgig.families import refmod
@@ -195,6 +195,7 @@ def _poll_stats_loop():
         vu = vt = 0
         name = "GPU"
         extra = {}
+        counter = None
         want = str(os.environ.get("CUDA_VISIBLE_DEVICES") or load_prefs().get("cuda_device") or "").split(",")[0]
         want = want.strip()
         try:
@@ -203,6 +204,8 @@ def _poll_stats_loop():
                      nvml.nvmlDeviceGetHandleByIndex(int(want) if want.isdigit() else 0))
                 m = nvml.nvmlDeviceGetMemoryInfo(h)
                 vu, vt = int(m.used), int(m.total)
+                extra = power.read_nvml(nvml, h)       # the draw, its limit, load, temperature, the energy counter
+                counter = extra.pop("energy_mj", None)
                 name = nvml.nvmlDeviceGetName(h)
                 name = name.decode("utf-8", "ignore") if isinstance(name, bytes) else name
         except Exception:
@@ -231,6 +234,9 @@ def _poll_stats_loop():
                           ram_peak=max(_stats["ram_peak"], ru), **extra)
             mine = {"running": _run["proc"] is not None and _run["proc"].poll() is None, "state": _run["state"],
                     "lora": _run["lora"], "output_dir": _run["output_dir"]}
+            training = _run.get("stage") == "Training"
+            frac = float((_run.get("progress") or {}).get("percent") or 0.0) / 100.0
+        power.meter.sample(extra.get("power"), counter, training=training, frac=frac)   # counts only while a run is live
         time.sleep(1.0)
 
 
@@ -436,7 +442,8 @@ def set_folder_trigger(folder, word):
 
 # the Preferences settings Reset to defaults puts back (the model files are never reset)
 SETTING_PREFS = ("lora_output_dir", "profiles_dir", "cache_dir", "input_lora_dir", "input_ref_dir",
-                 "inference_blocks_to_swap", "inference_int8", "lan_discovery", "update_check")
+                 "inference_blocks_to_swap", "inference_int8", "lan_discovery", "update_check",
+                 "power_price", "power_currency", "power_extra_watts")
 
 
 def load_prefs() -> dict:
@@ -1781,6 +1788,25 @@ def gpu_env(env, prefs=None):
     return env
 
 
+def _energy_info():
+    """The sidebar's and the run summary's power figures: this run's energy (power.meter) with Preferences' price and
+    rest-of-the-PC watts, and its estimate from how far through Training it is."""
+    price, currency, extra_w = power.price_settings(load_prefs())
+    return {"energy": power.meter.snapshot(extra_w), "power_price": price, "power_currency": currency,
+            "power_extra_watts": extra_w}
+
+
+def _history_end(result):
+    """The run ended (finished / failed / stopped / paused): stop its energy count and record the run with it."""
+    power.meter.stop()
+    price, currency, extra_w = power.price_settings(load_prefs())
+    e = power.meter.snapshot(extra_w)
+    if e:
+        e = {k: round(v, 3) if isinstance(v, float) else v for k, v in e.items() if not k.startswith("est_")}
+        e.update(price=price, currency=currency, extra_w=extra_w)
+    history.end(_run.get("history_id"), result, _run.get("progress"), energy=e)
+
+
 def _progress_dict(upd):
     """The tracker's update as the page shows it (the desktop app sends the same from its own tracker)."""
     step, total = int(upd.get("step") or 0), int(upd.get("total_steps") or 0)
@@ -1800,10 +1826,11 @@ def _run_stages(stages, out_dir):
         _run["started_at"] = time.time()
         _run["training_at"] = None             # the Training stage's start (the run summary's Training time)
         _stats["vram_peak"] = 0                # this run's peak, not the server's
+    power.meter.start()                        # and its own energy
     for stage in stages:
         with _lock:
             if _run["state"] == "stopped":
-                history.end(_run.get("history_id"), "stopped", _run.get("progress"))
+                _history_end("stopped")
                 webqueue.on_run_ended("stopped", _run.get("lora"), _queue_starter)
                 return
             _run["stage"] = stage.name
@@ -1818,7 +1845,7 @@ def _run_stages(stages, out_dir):
             append_log(f"✖ {stage.name} could not start: {e}\n" + _log_where())
             with _lock:
                 _run.update(state="failed", proc=None, ended_at=time.time())
-            history.end(_run.get("history_id"), "failed", _run.get("progress"))
+            _history_end("failed")
             webqueue.on_run_ended("failed", _run.get("lora"), _queue_starter)
             return
         with _lock:
@@ -1852,14 +1879,14 @@ def _run_stages(stages, out_dir):
             with _lock:
                 _run["proc"] = None              # gone: a stop-and-wait sees it at once
             append_log(f"\n■ Stopped during {stage.name}.\n")
-            history.end(_run.get("history_id"), "stopped", _run.get("progress"))
+            _history_end("stopped")
             webqueue.on_run_ended("stopped", _run.get("lora"), _queue_starter)
             return
         if ret != 0:
             append_log(f"\n✖ {stage.name} failed (exit code {ret}).\n" + _log_where())
             with _lock:
                 _run.update(state="failed", proc=None, ended_at=time.time())
-            history.end(_run.get("history_id"), "failed", _run.get("progress"))
+            _history_end("failed")
             if oom:
                 append_log(_oom_note(_run.get("history_id")))
             webqueue.on_run_ended("failed", _run.get("lora"), _queue_starter)
@@ -1872,7 +1899,7 @@ def _run_stages(stages, out_dir):
         paused = False
     with _lock:
         _run.update(state="paused" if paused else "completed", proc=None, stage="", ended_at=time.time())
-    history.end(_run.get("history_id"), "paused" if paused else "finished", _run.get("progress"))
+    _history_end("paused" if paused else "finished")
     webqueue.on_run_ended("paused" if paused else "finished", _run.get("lora"), _queue_starter)
     append_log("\n⏸ Paused. Resume continues from the saved state.\n" if paused else "\n✔ Run complete.\n")
     from fizgig.web import helpers as _h
@@ -3384,6 +3411,7 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 out = dict(_stats)
             out.update(_side_extras())
+            out.update(_energy_info())
             return self.json(out)
         if path == "/api/run":
             with _lock:

@@ -1526,6 +1526,8 @@ body { font-size: 13.5px; background: var(--bg-deep); }
 .meter-bar { height: 5px; border-radius: 999px; background: var(--bg-inset); overflow: hidden; }
 .meter-bar > span { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width .6s; }
 .meter.warn .meter-bar > span { background: var(--warning); }
+.meter-sub { margin-top: 3px; font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.power-num { margin-right: 6px; }
 
 /* the page */
 .notebook-pane { border: none; padding-bottom: 48px; background: var(--bg-deep); }

@@ -1123,6 +1123,7 @@ function renderPrefs() {
   host.append(outputFolderCard());
   host.append(foldersCard());
   host.append(inferenceCard());
+  host.append(powerCard());
   host.append(captionerCard());
   const gpuCard = gpuPickCard();
   if (gpuCard) host.append(gpuCard);
@@ -1264,6 +1265,31 @@ function inferenceCard() {
       el("label", {class: "checkbox-label"}, int8, " INT8 fast inference (recommended)"),
       el("div", {class: "field-hint", text: "On by default: same memory as fp8, near-identical pictures, previews only. " +
         "Turn it off to use fp8."})));
+}
+
+// Power & cost: the price per kWh for a run's cost, its currency, and the rest of the PC's draw (the GPU is measured;
+// the CPU, drives and fans aren't, so a typical figure here makes the energy an estimate at the wall)
+function powerCard() {
+  const box = (key, ph, w) => {
+    const i = el("input", {type: "text", inputmode: "decimal", class: "power-num", placeholder: ph, style: `width:${w}px`});
+    i.value = S.set[key] ?? "";
+    i.addEventListener("change", () => {
+      const v = i.value.trim();
+      api("/api/prefs", {changes: {[key]: v}}).then(() => { S.set[key] = v; pollStats(); }).catch((e) => alert(e.message));
+    });
+    return i;
+  };
+  return el("div", {class: "section-card", id: "prefsPowerCard"}, el("div", {class: "card-title"}, el("span", {text: "Power & cost"})),
+    el("div", {class: "card-desc", text: "The sidebar's Power meter and each run's energy come from the GPU itself. Add " +
+      "your electricity price to see what a run costs."}),
+    el("div", {class: "card-content"},
+      el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Price per kWh:"}),
+        box("power_currency", "$", 48), box("power_price", "e.g. 0.30", 110)),
+      el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Rest of the PC:"}),
+        box("power_extra_watts", "e.g. 120", 110), el("span", {class: "field-hint", text: "W"})),
+      el("div", {class: "field-hint", text: "Optional. The GPU is measured; the CPU, drives and fans aren't. A typical " +
+        "desktop adds 80-150 W while training. With a figure here, energy and cost are estimated at the wall; empty, " +
+        "they're the GPU's alone."})));
 }
 
 // where the LoRA and reference pickers start (Preferences > Other folders, else what they used before)
@@ -2208,6 +2234,15 @@ function followLog() {
   src.onerror = () => { src.close(); if (S.logSrc === src) setTimeout(followLog, 3000); };
 }
 
+// ---- power: the GPU's draw now, and the energy a run uses (web/power.py), with Preferences' price for its cost
+const kwh = (wh) => wh == null ? "" : wh >= 1000 ? `${(wh / 1000).toFixed(2)} kWh` : wh >= 10 ? `${Math.round(wh)} Wh` :
+  `${wh.toFixed(1)} Wh`;
+const money = (wh, s) => s && s.power_price != null && wh != null ?
+  `${s.power_currency || "$"}${(wh / 1000 * s.power_price).toFixed(wh / 1000 * s.power_price < 10 ? 2 : 0)}` : "";
+// the energy figure people pay for: at the wall when "Rest of the PC" is set, else the GPU's own
+const usedWh = (e, s) => e ? ((s && s.power_extra_watts) ? e.wall_wh : e.gpu_wh) : null;
+const estWh = (e, s) => e ? ((s && s.power_extra_watts) ? e.est_wall_wh : e.est_gpu_wh) : null;
+
 async function pollStats() {
   let s;
   try { s = await api("/api/stats"); } catch (e) { return; }     // the server restarts
@@ -2221,6 +2256,19 @@ async function pollStats() {
   host.append(el("div", {class: "gpu-name", text: s.device_name}));
   if (s.util !== undefined && s.util !== null) host.append(meter("GPU", `${Math.round(s.util)}%` +
     (s.temp ? ` · ${Math.round(s.temp)}°C` : ""), s.util / 100, s.temp >= 85));
+  if (s.power != null) {
+    const pm = meter("Power", `${Math.round(s.power)}${s.power_limit ? ` / ${Math.round(s.power_limit)}` : ""} W`,
+      s.power_limit ? s.power / s.power_limit : 0, s.power_limit && s.power / s.power_limit > 0.97);
+    const e = s.energy;
+    if (e && e.live) {                    // this run so far, and where it's heading
+      const used = usedWh(e, s), est = estWh(e, s);
+      pm.append(el("div", {class: "meter-sub", title: "This run's energy so far, its cost, and the estimate for the whole run",
+        text: `Run ${kwh(used)}` + (money(used, s) ? ` · ${money(used, s)}` : "") + (est ? ` → ~${kwh(est)}` : "")}));
+    }
+    pm.title = "The GPU's power draw now, of its power limit" + (s.power_extra_watts ? "" :
+      ". GPU only: add the rest of your PC's draw in Preferences > Power & cost for an estimate at the wall");
+    host.append(pm);
+  }
   host.append(meter("VRAM", `${gb(s.vram[0])} / ${gb(s.vram[1])} GB`, s.vram[1] ? s.vram[0] / s.vram[1] : 0,
     s.vram[1] && s.vram[0] / s.vram[1] > 0.95));
   host.append(meter("RAM", `${gb(s.ram[0])} / ${gb(s.ram[1])} GB`, s.ram[1] ? s.ram[0] / s.ram[1] : 0,
@@ -2279,6 +2327,22 @@ function runSummary() {
     cell("Peak VRAM", live ? gb(s.vram_peak) : ""), cell(live ? "Time left" : "Steps",
       live ? p.eta : (p.total_steps ? `${p.step} of ${p.total_steps}` : "")),
   ]);
+  // Power: the energy meter's run (it keeps the last run's figures until the next starts), else the run's record
+  const e = s.energy || r.energy;
+  const wall = !!(s.power_extra_watts || (e && e.extra_w));
+  const usedNow = e ? (wall ? e.wall_wh : e.gpu_wh) : null, estNow = e && live ? estWh(e, s) : null;
+  const priced = {power_price: s.power_price ?? (e && e.price), power_currency: s.power_currency || (e && e.currency)};
+  const powerSec = e ? sec("Power", [
+    live && s.power != null ? cell("Draw now", `${Math.round(s.power)} W`) : null,
+    cell("Average", e.avg_w ? `${Math.round(e.avg_w)} W` + (e.peak_w ? ` · peak ${Math.round(e.peak_w)} W` : "") : ""),
+    cell(wall ? "Used (whole PC)" : "Used (GPU)", kwh(usedNow) + (wall && e.gpu_wh != null ? ` · GPU ${kwh(e.gpu_wh)}` : "")),
+    live ? cell("Estimated total", estNow ? `~${kwh(estNow)}` : "Once training is under way") : null,
+    priced.power_price != null ? cell(live ? "Cost so far" : "Cost", money(usedNow, priced) +
+      (estNow ? ` · ~${money(estNow, priced)} total` : "")) :
+      el("div", {class: "rs-cell"}, el("span", {class: "rs-key", text: "Cost"}),
+        el("a", {class: "inline-link", href: "#", text: "Set your price per kWh →", onclick: (ev) => {
+          ev.preventDefault(); showTab("prefs"); setTimeout(() => { const c = $("prefsPowerCard"); if (c) c.scrollIntoView({block: "center"}); }, 50); }})),
+  ]) : null;
   const lk = S.likeSummary;
   const learning = sec("Learning", [
     cell("Learning rate", p.lr), cell("Grad norm", p.grad_norm), cell("Loss", p.loss),
@@ -2311,7 +2375,7 @@ function runSummary() {
     .filter((k) => v[k] !== "" && v[k] != null && !k.startsWith("_"))
     .map((k) => `${k} = ${typeof v[k] === "object" ? JSON.stringify(v[k]) : v[k]}`).join("\n")}) : null;
   box.replaceChildren(el("div", {class: "card-title"}, el("span", {text: `Run summary: ${r.lora}`})),
-    el("div", {class: "card-content rs-body"}, time, learning, setup, ...(full ? [full] : [])));
+    el("div", {class: "card-content rs-body"}, time, ...(powerSec ? [powerSec] : []), learning, setup, ...(full ? [full] : [])));
   box.style.display = "";
 }
 
@@ -2900,7 +2964,10 @@ async function loadRuns() {
     return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
   for (const run of r.runs) {
     const p = run.progress;
-    const figs = p ? [p.epoch && `epoch ${p.epoch}/${p.total_epochs}`, p.loss && `loss ${p.loss}`].filter(Boolean).join(" · ") : "";
+    const en = run.energy, enWh = en ? (en.extra_w ? en.wall_wh : en.gpu_wh) : null;
+    const figs = [p && p.epoch && `epoch ${p.epoch}/${p.total_epochs}`, p && p.loss && `loss ${p.loss}`,
+      enWh != null && `${kwh(enWh)}${en.extra_w ? "" : " (GPU)"}` + (en.price != null ? ` · ${money(enWh, {power_price: en.price, power_currency: en.currency})}` : "")]
+      .filter(Boolean).join(" · ");
     const files = el("div", {class: "run-files", style: "display:none"});
     const showFiles = el("button", {class: "btn btn-sm", text: "Previews & checkpoints", onclick: async () => {
       if (files.style.display === "none") {
